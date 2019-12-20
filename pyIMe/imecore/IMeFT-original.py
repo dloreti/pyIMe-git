@@ -106,151 +106,85 @@ def factor_with_faults(A: core.DistributedMatrix, S: core.DistributedMatrix, n:i
                 for j in range(c):
                     S.local_array[i,j] = (S.local_array[i,j] - S.local_array[l-1,j]*lc[i]) /h[i]
         
-        if l in faults: # there is faults at this level
-            dist_recover(N, l, faults.get(l), A,S, n,c,m, Lambda, allocation, comm, rank)
-            #recover(N, l, faults.get(l), A,S, n,c, Lambda, allocation, comm, rank)
+        if l in faults: # there is fault at this level
+            #gA = A.to_global_array(rank=0)
+            #if rank==0:
+            #    print("\n- Level: "+str(l))
+            #    print('A (l=%d): \n%s' % (l,u.stringmat_compressed(gA)))
+        
+            Nf = faults.get(l) #list of fallen processor
+            f=len(Nf)
+            #if allocation='C':
+            #    A_original=A.to_global_array(rank=0)
+                
+            
+            if rank in Nf:
+                original=np.copy(A.local_array[:,:])
+                A.local_array[:,:]=np.zeros((n,c)) # set to zeros to simulate faults
+                A_r = (np.take(Lambda[:,:f],Nf,axis=0)).T  
+                #print('P%d: A_r: \n%s' % (rank, u.stringmat_compressed(A_r)))
+                LU,piv=lu_factor(A_r,False)
+                #print('LU: \n%s' % (u.stringmat_compressed(LU)))            
+            #if rank < N:
+            b=np.zeros((n,c,f),dtype=np.float64)
+            for fidx in range(f):
+                if rank < N:
+                    for j in range(c):
+                        b[:,j,fidx] = -A.local_array[:,j]*Lambda[rank,fidx]  
+                    (gc,lic,ljc) = A.local_diagonal_indices(allow_non_square=True)
+                    #print("P%d %s" % (rank, (gc,lic,ljc) ))
+                    for el in range(len(gc)):
+                        b[lic[el],ljc[el],fidx] -= Lambda[rank,fidx]             
+                elif rank==N+fidx and allocation=='C':
+                    b[:,:,fidx] = A.local_array[:,:]
+                elif rank==N+fidx and allocation=='I':
+                    b[:,:,fidx] = S.local_array[:,:]
+                
+                b[:,:,fidx]=comm.reduce(b[:,:,fidx],root=Nf[0])#root=Nf[fidx])
+                #if rank==Nf[0]:
+                #for fidx in range(f):
+                    #print('Nf[fidx]=%d b[%d]: \n%s' % (Nf[fidx],fidx, u.stringmat_compressed(b[:,:,fidx])))
+            if rank==Nf[0]:
+                x=np.zeros((n,c,f),dtype=np.float64)
+                for i in range(n):                    
+                    for j in range(c):
+                        x[i,j,:]=lu_solve((LU,piv),b[i,j,:])
+                        A.local_array[i,j]=x[i,j,0]
+                print('++++ P%d reconstruction ok? %s'%(rank,np.allclose(original,A.local_array)))
+                #print('++++ P%d original \n%s'%(rank,u.stringmat_compressed(original)))
+                #print('++++ P%d A.local_array \n%s'%(rank,u.stringmat_compressed(A.local_array)))
+                    
+                for z in range(1,f):
+                    temp=np.zeros((n,c),dtype=np.float64)
+                    temp=np.array(x[:,:,z].T)
+                    #print('P%d sending x to %d dim = %s x[%d]:\n%s'%(rank,Nf[z],temp.shape,z, u.stringmat_compressed(temp)))
+                    comm.Send([temp, MPI.DOUBLE], dest=Nf[z], tag=l)
+            if rank!=Nf[0] and rank in Nf:
+                temp=np.empty((n,c),dtype=np.float64)
+                comm.Recv([temp, MPI.DOUBLE],source=Nf[0], tag=l)
+                A.local_array[:,:]=temp
+                print('++++ P%d reconstruction ok? %s'%(rank,np.allclose(original,A.local_array)))
+                #print('++++ P%d original \n%s'%(rank,u.stringmat_compressed(original)))
+                #print('++++ P%d A.local_array \n%s'%(rank,u.stringmat_compressed(A.local_array)))
+                #A.local_array[:,:]=temp[:,:]
+            
+            #if allocation=='C':
+                #A_reconstructed = A.to_global_array(rank=0)
+                #if rank==0:
+                    #if not np.allclose(A_reconstructed, A_original):# - np.eye(n, dtype=np.float64))
+                        #print('A_original \n%s'%(u.stringmat_compressed(A_original)))
+                        #print('A_reconstructed \n%s'%(u.stringmat_compressed(A_reconstructed)))
+                    #else:
+                        #print("A correctly reconstructed")
             
     if allocation=='C':
         return A, None
     else:
         return A,S
+  
 
-def dist_recover(N: int, l: int, Nf: list, A: core.DistributedMatrix,S: core.DistributedMatrix, n,c,m, Lambda, allocation, comm, rank):
-    #gA = A.to_global_array(rank=0)
-    #if rank==0:
-    #    print("\n- Level: "+str(l))
-    #    print('A (l=%d): \n%s' % (l,u.stringmat_compressed(gA)))
-
-    #Nf = faults.get(l) #list of fallen processor
-    f=len(Nf)
-    #if allocation='C':
-    #    A_original=A.to_global_array(rank=0)
-        
-    
-    if rank in Nf:
-        original=np.copy(A.local_array[:,:])
-        A.local_array[:,:]=np.zeros((n,c)) # set to zeros to simulate faults
-        A_r = (np.take(Lambda[:,:f],Nf,axis=0)).T  
-        #print('P%d: A_r: \n%s' % (rank, u.stringmat_compressed(A_r)))
-        LU,piv=lu_factor(A_r,False)
-        #print('LU: \n%s' % (u.stringmat_compressed(LU)))            
-    #b=np.zeros((n,c,f),dtype=np.float64)
-
-
-    if rank in Nf:
-        rec_group = comm.group.Incl(Nf)
-        rec_comm = comm.Create_group(rec_group)
-        rec_cxt = core.ProcessContext([1,rec_comm.size],rec_comm)
-        b_def=core.DistributedMatrix([n,c*f],block_shape=[n, c] ,context=rec_cxt)
-
-    b = core.DistributedMatrix([n,m], dtype=np.float64)
-    
-    for fidx in range(f):
-        if rank < N:
-            #for j in range(c):
-                #b.local_array[:,j] = -A.local_array[:,j]*Lambda[rank,fidx]  
-            b.local_array[:,:] = -A.local_array * Lambda[rank,fidx]  
-            (gc,lic,ljc) = A.local_diagonal_indices(allow_non_square=True)
-            #print("P%d %s" % (rank, (gc,lic,ljc) ))
-            for el in range(len(gc)):
-                b.local_array[lic[el],ljc[el]] -= Lambda[rank,fidx]             
-            #print('++++ fidx=%d P%d: Lambda[rank,fidx]=%s b.local_array: \n%s\n A.local_array:\n%s' % (fidx,rank, Lambda[rank,fidx],u.stringmat_compressed(b.local_array), u.stringmat_compressed(A.local_array)))
-        elif rank==N+fidx and allocation=='C':
-            b.local_array[:,:] = A.local_array[:,:]
-        elif rank==N+fidx and allocation=='I':
-            b.local_array[:,:] = S.local_array[:,:]
-        else:
-            b.local_array[:,:]=np.zeros((n,c),dtype=np.float64)
-        #print('+++++++++++++++++++ fidx=%d P%d: b.local_array: \n%s\n A.local_array:\n%s' % (fidx,rank, u.stringmat_compressed(b.local_array), u.stringmat_compressed(A.local_array)))
-        #print('+++++++++++++++++++ fidx=%d P%d: b.local_array: \n%s' % (fidx,rank, u.stringmat_compressed(b.local_array) ))
-    
-        b.local_array[:,:]=comm.reduce(b.local_array[:,:],root=Nf[fidx])
-        if rank==Nf[fidx]:
-            b_def.local_array[:,:]=np.copy(b.local_array)
-            #print('Nf[%d]=%d b_def: \n%s' % (fidx, Nf[fidx], u.stringmat_compressed(b_def)))
-
-    if rank in Nf:
-        #exchange the right-hand sides among recovered nodes. each block has n/f rows and c cols
-        b_def=b_def.T
-        print('P%d b_def: \n%s' % (rank, u.stringmat_compressed(b_def.local_array)))
-        (b_n,b_m)=b_def.local_array.shape
-        for i in range(c):
-            for j in range(b_m):
-                b_def.local_array[i::c,j]=lu_solve((LU,piv),b_def.local_array[i::c,j])
-        b_def=b_def.T
-        A.local_array[:,:]=b_def.local_array[:,:]
-
-
-def recover(N: int, l: int, Nf: list, A: core.DistributedMatrix,S: core.DistributedMatrix, n,c, Lambda, allocation, comm, rank):
-    #gA = A.to_global_array(rank=0)
-    #if rank==0:
-    #    print("\n- Level: "+str(l))
-    #    print('A (l=%d): \n%s' % (l,u.stringmat_compressed(gA)))
-
-    #Nf = faults.get(l) #list of fallen processor
-    f=len(Nf)
-    #if allocation='C':
-    #    A_original=A.to_global_array(rank=0)
-        
-    
-    if rank in Nf:
-        original=np.copy(A.local_array[:,:])
-        A.local_array[:,:]=np.zeros((n,c)) # set to zeros to simulate faults
-        A_r = (np.take(Lambda[:,:f],Nf,axis=0)).T  
-        print('P%d: A_r: \n%s' % (rank, u.stringmat_compressed(A_r)))
-        LU,piv=lu_factor(A_r,False)
-        #print('LU: \n%s' % (u.stringmat_compressed(LU)))            
-    #if rank < N:
-    b=np.zeros((n,c,f),dtype=np.float64)
-    for fidx in range(f):
-        if rank < N:
-            for j in range(c):
-                b[:,j,fidx] = -A.local_array[:,j]*Lambda[rank,fidx]  
-            (gc,lic,ljc) = A.local_diagonal_indices(allow_non_square=True)
-            #print("P%d %s" % (rank, (gc,lic,ljc) ))
-            for el in range(len(gc)):
-                b[lic[el],ljc[el],fidx] -= Lambda[rank,fidx]             
-        elif rank==N+fidx and allocation=='C':
-            b[:,:,fidx] = A.local_array[:,:]
-        elif rank==N+fidx and allocation=='I':
-            b[:,:,fidx] = S.local_array[:,:]
-        
-        b[:,:,fidx]=comm.reduce(b[:,:,fidx],root=Nf[0])#root=Nf[fidx])
-        #if rank==Nf[0]:
-        #for fidx in range(f):
-            #print('Nf[fidx]=%d b[%d]: \n%s' % (Nf[fidx],fidx, u.stringmat_compressed(b[:,:,fidx])))
-    if rank==Nf[0]:
-        x=np.zeros((n,c,f),dtype=np.float64)
-        for i in range(n):                    
-            for j in range(c):
-                x[i,j,:]=lu_solve((LU,piv),b[i,j,:])
-                A.local_array[i,j]=x[i,j,0]
-        print('++++ P%d reconstruction ok? %s'%(rank,np.allclose(original,A.local_array)))
-        #print('++++ P%d original \n%s'%(rank,u.stringmat_compressed(original)))
-        #print('++++ P%d A.local_array \n%s'%(rank,u.stringmat_compressed(A.local_array)))
-            
-        for z in range(1,f):
-            temp=np.zeros((n,c),dtype=np.float64)
-            temp=np.array(x[:,:,z].T)
-            #print('P%d sending x to %d dim = %s x[%d]:\n%s'%(rank,Nf[z],temp.shape,z, u.stringmat_compressed(temp)))
-            comm.Send([temp, MPI.DOUBLE], dest=Nf[z], tag=l)
-    if rank!=Nf[0] and rank in Nf:
-        temp=np.empty((n,c),dtype=np.float64)
-        comm.Recv([temp, MPI.DOUBLE],source=Nf[0], tag=l)
-        A.local_array[:,:]=temp
-        print('++++ P%d reconstruction ok? %s'%(rank,np.allclose(original,A.local_array)))
-        #print('++++ P%d original \n%s'%(rank,u.stringmat_compressed(original)))
-        #print('++++ P%d A.local_array \n%s'%(rank,u.stringmat_compressed(A.local_array)))
-        #A.local_array[:,:]=temp[:,:]
-    
-    #if allocation=='C':
-        #A_reconstructed = A.to_global_array(rank=0)
-        #if rank==0:
-            #if not np.allclose(A_reconstructed, A_original):# - np.eye(n, dtype=np.float64))
-                #print('A_original \n%s'%(u.stringmat_compressed(A_original)))
-                #print('A_reconstructed \n%s'%(u.stringmat_compressed(A_reconstructed)))
-            #else:
-                #print("A correctly reconstructed")
+def recover():
+    pass
 
 
 

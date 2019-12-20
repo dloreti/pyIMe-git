@@ -33,8 +33,9 @@ size = comm.size
 
 
 R=3   #number of recovery nodes (the ones hosting the checksums)
-#faults={4:[0,3]}
-faults={4:[0,3],6:[2]}
+faults={4:[0,3]}
+#faults={4:[0,3],6:[2]}
+#faults={4:[0,3,2]}
 alloc='C'   
 
 P=size
